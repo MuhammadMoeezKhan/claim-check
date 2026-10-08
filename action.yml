@@ -1,0 +1,120 @@
+name: claim-check
+description: Check a coding agent's "all tests pass" against mechanical evidence and keep a content-addressed receipt.
+author: Muhammad Moeez Khan
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  base-ref:
+    description: Git ref of the code before the agent's change (needs actions/checkout with fetch-depth 0).
+    required: true
+  test-cmd:
+    description: The visible test command, for example "python -m pytest -q".
+    required: true
+  claim:
+    description: The agent's final message or a JSON claim.
+    required: false
+    default: ""
+  claim-file:
+    description: A file holding the agent's final message or JSON claim (used instead of claim).
+    required: false
+    default: ""
+  heldout-dir:
+    description: Directory of held-out tests the agent never saw, copied into the workspace.
+    required: false
+    default: ""
+  heldout-cmd:
+    description: Command that runs the held-out tests.
+    required: false
+    default: ""
+  reference:
+    description: Python file with reference(*args) and generate(rng) and/or cases(), for the randomized check.
+    required: false
+    default: ""
+  target:
+    description: module:function under test, compared with the reference.
+    required: false
+    default: ""
+  hmac-key:
+    description: Secret used to sign the receipt. Pass a repository secret; the agent must not have it.
+    required: false
+    default: ""
+  fail-on:
+    description: "refuted (fail the job only on REFUTED), not-verified (also on UNCONFIRMED), or none."
+    required: false
+    default: not-verified
+  upload-sarif:
+    description: Upload findings to GitHub code scanning ("true" or "false").
+    required: false
+    default: "true"
+
+outputs:
+  verdict:
+    description: VERIFIED, REFUTED or UNCONFIRMED.
+    value: ${{ steps.run.outputs.verdict }}
+  receipt-id:
+    description: Content address of the receipt.
+    value: ${{ steps.run.outputs.receipt-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install claim-check
+      shell: bash
+      run: python -m pip install --quiet "$GITHUB_ACTION_PATH"
+
+    - name: Run claim-check
+      id: run
+      shell: bash
+      env:
+        CC_BASE: ${{ inputs.base-ref }}
+        CC_TEST_CMD: ${{ inputs.test-cmd }}
+        CC_CLAIM: ${{ inputs.claim }}
+        CC_CLAIM_FILE: ${{ inputs.claim-file }}
+        CC_HELDOUT_DIR: ${{ inputs.heldout-dir }}
+        CC_HELDOUT_CMD: ${{ inputs.heldout-cmd }}
+        CC_REFERENCE: ${{ inputs.reference }}
+        CC_TARGET: ${{ inputs.target }}
+        CLAIM_CHECK_HMAC_KEY: ${{ inputs.hmac-key }}
+      run: |
+        args=(run --base "git:$CC_BASE" --head . --test-cmd "$CC_TEST_CMD"
+              --receipt .claim-check/receipt.json --sarif .claim-check/claim-check.sarif)
+        if [ -n "$CC_CLAIM_FILE" ]; then args+=(--claim-file "$CC_CLAIM_FILE"); else args+=(--claim "$CC_CLAIM"); fi
+        if [ -n "$CC_HELDOUT_DIR" ]; then args+=(--heldout-dir "$CC_HELDOUT_DIR" --heldout-cmd "$CC_HELDOUT_CMD"); fi
+        if [ -n "$CC_REFERENCE" ]; then args+=(--reference "$CC_REFERENCE" --target "$CC_TARGET"); fi
+        set +e
+        claim-check "${args[@]}"
+        set -e
+        python - <<'PY' >> "$GITHUB_OUTPUT"
+        import json
+        r = json.load(open(".claim-check/receipt.json"))
+        print(f"verdict={r['body']['verdict']}")
+        print(f"receipt-id={r['id']}")
+        PY
+
+    - name: Upload SARIF
+      if: always() && inputs.upload-sarif == 'true' && hashFiles('.claim-check/claim-check.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: .claim-check/claim-check.sarif
+        category: claim-check
+
+    - name: Upload receipt
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: claim-check-receipt
+        path: .claim-check/
+        include-hidden-files: true
+
+    - name: Gate on verdict
+      shell: bash
+      env:
+        CC_VERDICT: ${{ steps.run.outputs.verdict }}
+        CC_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "claim-check verdict: $CC_VERDICT"
+        if [ "$CC_FAIL_ON" = "refuted" ] && [ "$CC_VERDICT" = "REFUTED" ]; then exit 1; fi
+        if [ "$CC_FAIL_ON" = "not-verified" ] && [ "$CC_VERDICT" != "VERIFIED" ]; then exit 1; fi
+        exit 0

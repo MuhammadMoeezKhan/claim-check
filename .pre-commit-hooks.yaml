@@ -1,0 +1,7 @@
+- id: claim-check-scan
+  name: claim-check static rules
+  description: Flag test tampering and test-gaming patterns in the working tree, compared with HEAD.
+  entry: claim-check scan --base git:HEAD --head .
+  language: python
+  pass_filenames: false
+  always_run: true
